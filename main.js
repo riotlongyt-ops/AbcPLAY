@@ -179,6 +179,10 @@ let state = {
   pendingFetches: []
 };
 
+// current media engine instances for strict teardown
+let __abcCurrentPlayer = null;
+let __abcCurrentHls = null;
+
 /* ---- Helpers ---- */
 function safeFetch(url, fallbackData = null) {
   return fetch(url).then(res => {
@@ -666,77 +670,83 @@ async function openDetail(idOrObj, image) {
   // VidLink default src depending on normalized type
   const typeForVid = isTv ? 'tv' : 'movie';
 
-  // inject a VidSrc iframe immediately (default tab is movie)
+  // Replace custom player / proxy scraping with a direct VidLink iframe embed.
+  // mountVidsrc now injects the official VidLink embed iframe (movie or tv) and does strict teardown.
   function mountVidsrc(season = null, episode = null) {
-    // remove any existing children to force complete teardown
-    movieContainer.innerHTML = "";
-    const src = (typeForVid === "tv")
-      ? createVidlinkUrl(id, "tv", season || 1, episode || 1)
-      : createVidlinkUrl(id, "movie");
-    // install interceptor immediately before creating the remote iframe
-    ensurePopupInterceptor();
+    try {
+      // Teardown any previous player references
+      if (__abcCurrentHls) { try { __abcCurrentHls.destroy(); } catch(e){}; __abcCurrentHls = null; }
+      if (__abcCurrentPlayer) { try { __abcCurrentPlayer.pause(); } catch(e){}; __abcCurrentPlayer = null; }
+    } catch(e){}
 
-    const ifr = document.createElement("iframe");
-    // No sandbox (omitted intentionally) to allow player decryption; add fullscreen & scrolling attributes
-    ifr.setAttribute("frameborder", "0");
-    ifr.setAttribute("scrolling", "no");
-    ifr.setAttribute("allowfullscreen", "true");
-    ifr.setAttribute("webkitallowfullscreen", "true");
-    ifr.setAttribute("mozallowfullscreen", "true");
-    ifr.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture");
-    ifr.style.width = "100%";
-    ifr.style.height = "100%";
-    ifr.style.aspectRatio = "16/9";
-    ifr.style.border = "none";
-    ifr.style.overflow = "hidden";
-    ifr.style.setProperty('overflow', 'hidden', 'important');
-    ifr.src = src;
-    // click capture inside player workspace: block click-under background links
-    ifr.addEventListener('load', ()=> {
-      try {
-        // If possible, bind a transparent overlay to intercept clicks on the iframe element itself
-        movieContainer.querySelectorAll('.player-intercept-overlay').forEach(n=>n.remove());
-        const overlay = document.createElement('div');
-        overlay.className = 'player-intercept-overlay';
-        overlay.style.position = 'absolute';
-        overlay.style.inset = '0';
-        overlay.style.zIndex = '2';
-        overlay.style.background = 'transparent';
-        overlay.style.pointerEvents = 'auto';
-        overlay.addEventListener('click', function(e){ e.preventDefault(); e.stopImmediatePropagation(); }, true);
-        movieContainer.style.position = 'relative';
-        movieContainer.appendChild(overlay);
-      } catch(e){}
-    });
-    movieContainer.appendChild(ifr);
-  }
-  // alias kept for legacy references
-  const mountVidlink = mountVidsrc;
-
-  // inject trailer (YouTube) iframe and ensure VidSrc is destroyed
-  function mountTrailer() {
-    // destroy vidsrc immediately
     movieContainer.innerHTML = "";
     trailerContainer.innerHTML = "";
-    trailerContainer.classList.remove("hidden");
+    movieContainer.classList.remove('hidden');
+    trailerContainer.classList.add('hidden');
+
+    // construct VidLink URL using existing helper
+    const src = createVidlinkUrl(id, typeForVid, season || 1, episode || 1);
+    if (!src) {
+      movieContainer.innerHTML = `<div style="padding:20px;color:var(--muted);text-align:center">Invalid media source</div>`;
+      return;
+    }
+
+    // create iframe element for VidLink
+    const iframe = document.createElement('iframe');
+    iframe.src = src;
+    iframe.setAttribute('frameborder', '0');
+    iframe.setAttribute('allowfullscreen', 'true');
+    iframe.setAttribute('webkitallowfullscreen', 'true');
+    iframe.setAttribute('mozallowfullscreen', 'true');
+    iframe.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+    // sizing handled by CSS rules (.vidlink-wrap iframe)
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.aspectRatio = '16/9';
+    iframe.style.border = 'none';
+    iframe.style.display = 'block';
+    iframe.loading = 'lazy';
+
+    // insert iframe and keep no other players active
+    movieContainer.appendChild(iframe);
+
+    // keep a reference so we can teardown quickly
+    __abcCurrentPlayer = iframe;
+  }
+  // alias for legacy usage
+  const mountVidlink = mountVidsrc;
+
+  // mountTrailer: fully destroy VidLink iframe and create YouTube embed (autoplay)
+  function mountTrailer() {
+    // full teardown of VidLink iframe
+    try {
+      if (__abcCurrentPlayer && __abcCurrentPlayer.remove) {
+        __abcCurrentPlayer.remove();
+      }
+      __abcCurrentPlayer = null;
+    } catch(e){}
+
+    movieContainer.innerHTML = "";
+    trailerContainer.innerHTML = "";
+    trailerContainer.classList.remove('hidden');
+
     if (trailerKey) {
-      const yt = document.createElement("iframe");
-      yt.setAttribute("frameborder", "0");
-      yt.setAttribute("scrolling", "no");
-      yt.setAttribute("allowfullscreen", "true");
-      yt.setAttribute("webkitallowfullscreen", "true");
-      yt.setAttribute("mozallowfullscreen", "true");
-      yt.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture");
-      yt.style.width = "100%";
-      yt.style.height = "100%";
-      yt.style.aspectRatio = "16/9";
-      yt.style.border = "none";
-      yt.style.overflow = "hidden";
+      const yt = document.createElement('iframe');
+      yt.setAttribute('frameborder', '0');
+      yt.setAttribute('allowfullscreen', 'true');
+      yt.setAttribute('webkitallowfullscreen', 'true');
+      yt.setAttribute('mozallowfullscreen', 'true');
+      yt.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
       yt.src = `https://www.youtube.com/embed/${trailerKey}?autoplay=1`;
+      yt.style.width = '100%';
+      yt.style.height = '100%';
+      yt.style.aspectRatio = '16/9';
+      yt.style.border = 'none';
+      yt.style.display = 'block';
+      yt.loading = 'lazy';
       trailerContainer.appendChild(yt);
     } else {
-      // fallback to a simple video element if no youtube key
-      trailerContainer.innerHTML = `<video id="simVideo" loop muted playsinline src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" controls style="width:100%;height:100%;aspect-ratio:16/9;border-radius:8px;overflow:hidden"></video>`;
+      trailerContainer.innerHTML = `<div style="padding:18px;color:var(--muted);text-align:center">Trailer unavailable</div>`;
     }
   }
 
@@ -952,14 +962,21 @@ function ensurePopupInterceptor() {
 function closeModal(){
   modal.classList.add("hidden");
   playerSim.classList.add("hidden");
-  // stop any video element if present
+  // stop any video element if present (simulated trailer)
   const sim = qs("#simVideo");
   if (sim && sim.pause) try { sim.pause(); sim.currentTime = 0; } catch(e){}
+
   // STRICT: remove/destroy ALL iframe and video elements inside containers to force teardown
   const movieContainer = qs("#movieContainer");
   const trailerContainer = qs("#trailerContainer");
+
+  // exact millisecond teardown: pause + destroy HLS + remove player node
+  try {
+    if (__abcCurrentPlayer) { try { __abcCurrentPlayer.pause(); } catch(e){}; __abcCurrentPlayer.remove(); __abcCurrentPlayer = null; }
+    if (__abcCurrentHls) { try { __abcCurrentHls.destroy(); } catch(e){}; __abcCurrentHls = null; }
+  } catch(e){}
+
   if (movieContainer) {
-    // exact millisecond teardown
     movieContainer.innerHTML = "";
   }
   if (trailerContainer) {
@@ -1043,17 +1060,25 @@ async function init(){
     });
   }
 
-  // Intercept clicks inside player workspace to prevent click-under links
+  // Intercept clicks early but only block suspicious outbound anchor links (do not freeze iframe/player controls)
   document.addEventListener('click', function(e){
     try {
-      const path = e.composedPath ? e.composedPath() : (e.path || []);
-      const playerNode = qs('#movieContainer') || qs('.player-sim');
-      if (!playerNode) return;
-      if (path.includes(playerNode) || playerNode.contains(e.target)) {
-        // prevent any background click-under attempts
+      // If the click is on or within an anchor, evaluate it
+      const targetLink = e.target && e.target.closest ? e.target.closest('a') : null;
+      if (!targetLink) return;
+
+      const href = targetLink.href || '';
+      // allow same-origin and known safe hosts
+      const safeHosts = [window.location.hostname, 'tmdb.org', 'themoviedb.org', 'youtube.com', 'youtu.be'];
+      const isExternal = href && !safeHosts.some(h => href.includes(h));
+
+      // Block only when anchor intends to open a new tab or navigates offsite
+      if (targetLink.target === '_blank' || isExternal) {
         e.preventDefault();
         e.stopPropagation();
+        console.warn('NetworkShield: Blocked unauthorized ad popup link to:', href);
       }
+      // otherwise, allow the click to proceed (no preventDefault) so iframe/player controls work
     } catch(err){}
   }, true);
 
